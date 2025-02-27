@@ -96,12 +96,21 @@ app.post('/api/admin/signup', [
     const { data: admin, error } = await supabase
       .from('admins')
       .insert([
-        { email, password: hashedPassword, name, staffId, grade }
+        { 
+          email, 
+          password: hashedPassword, 
+          name, 
+          staff_id: staffId,
+          grade 
+        }
       ])
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase error:', error);
+      throw error;
+    }
 
     // Generate JWT token
     const token = jwt.sign({ id: admin.id }, process.env.JWT_SECRET);
@@ -109,12 +118,13 @@ app.post('/api/admin/signup', [
       token,
       user: {
         name: admin.name,
-        staffId: admin.staffId,
+        staffId: admin.staff_id,
         grade: admin.grade
       }
     });
 
   } catch (error) {
+    console.error('Server error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -155,7 +165,7 @@ app.post('/api/admin/signin', [
       token,
       user: {
         name: admin.name,
-        staffId: admin.staffId,
+        staffId: admin.staff_id,
         grade: admin.grade
       }
     });
@@ -180,7 +190,13 @@ app.post('/api/workers', authenticateToken, [
 
     const { data, error } = await supabase
       .from('workers')
-      .insert([req.body])
+      .insert([{
+        name: req.body.name,
+        staff_id: req.body.staffId,
+        grade: req.body.grade,
+        default_area: req.body.defaultArea,
+        transport_required: req.body.transportRequired
+      }])
       .select();
 
     if (error) throw error;
@@ -206,28 +222,62 @@ app.get('/api/workers', authenticateToken, async (req, res) => {
   }
 });
 
-// Add overtime entry
-app.post('/api/overtime', authenticateToken, [
-  body('workerId').notEmpty(),
-  body('date').isISO8601(),
-  body('entryTime').matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/),
-  body('exitTime').matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/),
-], async (req, res) => {
+// Get worker's overtime entry
+app.post('/api/overtime', authenticateToken, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
+    // First get the worker to check their default area
+    const { data: worker, error: workerError } = await supabase
+      .from('workers')
+      .select('*')
+      .eq('id', req.body.worker_id)
+      .single();
+
+
+
+    // Get the rate for the worker's default area
+    const { data: areaData, error: areaError } = await supabase
+      .from('areas')
+      .select('rate')
+      .eq('default_area', worker.default_area)
+      .single();
+
+
+    // Set transportation_cost when transportation is true
+    const transportation_cost = req.body.transportation ? areaData.rate : null;
 
     const { data, error } = await supabase
       .from('overtime_entries')
-      .insert([req.body])
-      .select();
+      .insert([{
+        worker_id: req.body.worker_id,
+        date: req.body.date,
+        entry_time: req.body.entry_time,
+        exit_time: req.body.exit_time,
+        category: req.body.category,
+        category_a_hours: req.body.category_a_hours,
+        category_c_hours: req.body.category_c_hours,
+        transportation: req.body.transportation,
+        transportation_cost: transportation_cost
+      }])
+      .select(`
+        *,
+        workers (
+          name,
+          staff_id,
+          grade,
+          default_area
+        )
+      `);
 
-    if (error) throw error;
+    if (error) {
+      console.error('Insert error:', error);
+      throw error;
+    }
+    console.log('Inserted data:', data);
+
     res.json(data[0]);
 
   } catch (error) {
+    console.error('Error creating overtime entry:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -236,23 +286,39 @@ app.post('/api/overtime', authenticateToken, [
 app.get('/api/overtime/:workerId', authenticateToken, async (req, res) => {
   try {
     const { workerId } = req.params;
-    const { startDate, endDate } = req.query;
+    const { month, year } = req.query;
 
-    let query = supabase
+    const formattedMonth = month.toString().padStart(2, '0');
+    const startDate = `${year}-${formattedMonth}-01`;
+    const endDate = new Date(year, month, 0).toISOString().split('T')[0];
+
+    const { data: entries, error } = await supabase
       .from('overtime_entries')
-      .select('*')
-      .eq('workerId', workerId);
-
-    if (startDate && endDate) {
-      query = query
-        .gte('date', startDate)
-        .lte('date', endDate);
-    }
-
-    const { data, error } = await query;
+      .select(`
+        *,
+        workers (
+          name,
+          staff_id,
+          grade,
+          default_area
+        )
+      `)
+      .eq('worker_id', workerId)
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .order('date', { ascending: true });
 
     if (error) throw error;
-    res.json(data);
+
+    // Ensure transportation_cost is always a number
+    const processedData = entries.map(entry => ({
+      ...entry,
+      transportation_cost: entry.transportation ? 
+        (entry.transportation_cost || parseFloat(entry.workers.default_area) || 0) : 
+        0
+    }));
+
+    res.json(processedData);
 
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -263,49 +329,26 @@ app.get('/api/overtime/:workerId', authenticateToken, async (req, res) => {
 app.get('/api/summary/monthly', authenticateToken, async (req, res) => {
   try {
     const { month, year } = req.query;
+    
+    const formattedMonth = month.toString().padStart(2, '0');
+    const startDate = `${year}-${formattedMonth}-01`;
+    const endDate = new Date(year, month, 0).toISOString().split('T')[0];
 
     const { data: summary, error } = await supabase
-      .from('monthly_summaries')
-      .select('*')
-      .gte('month', `${year}-${month}-01`)
-      .lt('month', `${year}-${parseInt(month) + 1}-01`);
+      .rpc('get_monthly_summary', {
+        start_date: startDate,
+        end_date: endDate
+      });
 
     if (error) throw error;
-    res.json(summary);
 
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+    // Ensure transportation_cost is always a number
+    const processedSummary = summary.map(item => ({
+      ...item,
+      transportation_cost: item.transportation_cost || 0
+    }));
 
-// Add overtime entry
-app.post('/api/overtime', authenticateToken, [
-  body('workerId').notEmpty(),
-  body('date').isISO8601(),
-  body('totalHours').isInt({ min: 1, max: 24 }),
-  body('transportation').isBoolean(),
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
-    const { data, error } = await supabase
-      .from('overtime_entries')
-      .insert([req.body])
-      .select(`
-        *,
-        workers (
-          name,
-          staffId,
-          grade,
-          defaultArea
-        )
-      `);
-
-    if (error) throw error;
-    res.json(data[0]);
+    res.json(processedSummary);
 
   } catch (error) {
     res.status(500).json({ error: error.message });
