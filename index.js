@@ -401,14 +401,16 @@ app.get('/api/overtime/check-duplicate', authenticateToken, async (req, res) => 
       .from('overtime_entries')
       .select('id')
       .eq('worker_id', worker_id)
-      .eq('date', date)
-      .maybeSingle();
+      .eq('date', date);
 
     if (error) {
       throw error;
     }
 
-    return res.json({ exists: !!data });
+    // Check if we got any results
+    const exists = Array.isArray(data) && data.length > 0;
+    return res.json({ exists });
+
   } catch (error) {
     console.error('Error checking duplicate entry:', error);
     return res.status(500).json({ error: 'Failed to check for duplicate entry' });
