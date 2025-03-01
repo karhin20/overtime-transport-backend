@@ -11,7 +11,7 @@ const app = express();
 
 // CORS configuration
 const corsOptions = {
-  origin: process.env.FRONTEND_URL ,
+  origin: process.env.FRONTEND_URL || 'http://localhost:8080',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
@@ -225,30 +225,14 @@ app.get('/api/workers', authenticateToken, async (req, res) => {
 // Get worker's overtime entry
 app.post('/api/overtime', authenticateToken, async (req, res) => {
   try {
-    const { worker_id, date } = req.body;
-
-    // Check for existing entry
-    const { data: existingEntry } = await supabase
-      .from('overtime_entries')
-      .select('id')
-      .eq('worker_id', worker_id)
-      .eq('date', date)
-      .maybeSingle();
-
-    if (existingEntry) {
-      return res.status(409).json({ 
-        error: 'An entry already exists for this worker on the selected date' 
-      });
-    }
-
     // First get the worker to check their default area
     const { data: worker, error: workerError } = await supabase
       .from('workers')
       .select('*')
-      .eq('id', worker_id)
+      .eq('id', req.body.worker_id)
       .single();
 
-    if (workerError) throw workerError;
+
 
     // Get the rate for the worker's default area
     const { data: areaData, error: areaError } = await supabase
@@ -257,7 +241,6 @@ app.post('/api/overtime', authenticateToken, async (req, res) => {
       .eq('default_area', worker.default_area)
       .single();
 
-    if (areaError) throw areaError;
 
     // Set transportation_cost when transportation is true
     const transportation_cost = req.body.transportation ? areaData.rate : null;
@@ -265,8 +248,8 @@ app.post('/api/overtime', authenticateToken, async (req, res) => {
     const { data, error } = await supabase
       .from('overtime_entries')
       .insert([{
-        worker_id: worker_id,
-        date: date,
+        worker_id: req.body.worker_id,
+        date: req.body.date,
         entry_time: req.body.entry_time,
         exit_time: req.body.exit_time,
         category: req.body.category,
@@ -290,11 +273,12 @@ app.post('/api/overtime', authenticateToken, async (req, res) => {
       throw error;
     }
 
+
     res.json(data[0]);
 
   } catch (error) {
     console.error('Error creating overtime entry:', error);
-    res.status(500).json({ error: 'Failed to create overtime entry. DUPLICATE Entry or Network issues' });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -387,36 +371,6 @@ app.get('/api/holidays', authenticateToken, async (req, res) => {
   }
 });
 
-// Add this new endpoint
-app.get('/api/overtime/check-duplicate', authenticateToken, async (req, res) => {
-  try {
-    const { worker_id, date } = req.query;
-
-    if (!worker_id || !date) {
-      return res.status(400).json({ error: 'Worker ID and date are required' });
-    }
-
-    // Query Supabase to check for existing entry
-    const { data, error } = await supabase
-      .from('overtime_entries')
-      .select('id')
-      .eq('worker_id', worker_id)
-      .eq('date', date);
-
-    if (error) {
-      throw error;
-    }
-
-    // Check if we got any results
-    const exists = Array.isArray(data) && data.length > 0;
-    return res.json({ exists });
-
-  } catch (error) {
-    console.error('Error checking duplicate entry:', error);
-    return res.status(500).json({ error: 'Failed to check for duplicate entry' });
-  }
-});
-
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
@@ -426,5 +380,4 @@ app.use((err, req, res, next) => {
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
-  console.log(`Server is accessible`); 
 });
