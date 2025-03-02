@@ -112,8 +112,13 @@ app.post('/api/admin/signup', [
       throw error;
     }
 
-    // Generate JWT token
-    const token = jwt.sign({ id: admin.id }, process.env.JWT_SECRET);
+    // Generate JWT token with 12-hour expiration
+    const token = jwt.sign(
+      { id: admin.id },
+      process.env.JWT_SECRET,
+      { expiresIn: '12h' }  // Token expires in 12 hours
+    );
+
     res.json({
       token,
       user: {
@@ -159,8 +164,13 @@ app.post('/api/admin/signin', [
       return res.status(400).json({ error: 'Invalid password' });
     }
 
-    // Generate JWT token
-    const token = jwt.sign({ id: admin.id }, process.env.JWT_SECRET);
+    // Generate JWT token with 12-hour expiration
+    const token = jwt.sign(
+      { id: admin.id },
+      process.env.JWT_SECRET,
+      { expiresIn: '12h' }  // Token expires in 12 hours
+    );
+
     res.json({
       token,
       user: {
