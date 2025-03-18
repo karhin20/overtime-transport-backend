@@ -381,6 +381,138 @@ app.get('/api/holidays', authenticateToken, async (req, res) => {
   }
 });
 
+// Risk Management endpoints
+// Get risk entries for a specific month and year
+app.get('/api/risk', authenticateToken, async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    
+    const formattedMonth = month.toString().padStart(2, '0');
+    const startDate = `${year}-${formattedMonth}-01`;
+    const endDate = new Date(year, month, 0).toISOString().split('T')[0];
+
+    const { data, error } = await supabase
+      .from('risk_entries')
+      .select(`
+        *,
+        worker:worker_id (
+          name,
+          staff_id,
+          grade
+        )
+      `)
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .order('date', { ascending: true });
+
+    if (error) throw error;
+    res.json(data);
+
+  } catch (error) {
+    console.error('Error fetching risk entries:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get risk summary by worker for a specific month and year
+app.get('/api/risk/summary', authenticateToken, async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    
+    const formattedMonth = month.toString().padStart(2, '0');
+    const startDate = `${year}-${formattedMonth}-01`;
+    const endDate = new Date(year, month, 0).toISOString().split('T')[0];
+
+    // Get all entries for the period
+    const { data: entries, error: entriesError } = await supabase
+      .from('risk_entries')
+      .select(`
+        *,
+        worker:worker_id (
+          name,
+          staff_id,
+          grade
+        )
+      `)
+      .gte('date', startDate)
+      .lte('date', endDate);
+    
+    if (entriesError) throw entriesError;
+
+    // Group and summarize by worker
+    const workerMap = new Map();
+    
+    entries.forEach(entry => {
+      const { worker_id, worker, rate } = entry;
+      
+      if (!workerMap.has(worker_id)) {
+        workerMap.set(worker_id, {
+          worker_id,
+          name: worker.name,
+          staff_id: worker.staff_id,
+          grade: worker.grade,
+          total_entries: 0,
+          total_amount: 0
+        });
+      }
+      
+      const summary = workerMap.get(worker_id);
+      summary.total_entries += 1;
+      summary.total_amount += rate || 10.00;
+    });
+    
+    const summaries = Array.from(workerMap.values());
+    res.json(summaries);
+
+  } catch (error) {
+    console.error('Error fetching risk summary:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create a new risk entry
+app.post('/api/risk', authenticateToken, async (req, res) => {
+  try {
+    const { worker_id, date, location, size_depth, remarks, rate = 10.00 } = req.body;
+    
+    // Validate required fields
+    if (!worker_id || !date || !location || !size_depth) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // Insert the risk entry
+    const { data, error } = await supabase
+      .from('risk_entries')
+      .insert([{
+        worker_id,
+        date,
+        location,
+        size_depth, 
+        remarks,
+        rate
+      }])
+      .select(`
+        *,
+        worker:worker_id (
+          name,
+          staff_id,
+          grade
+        )
+      `);
+    
+    if (error) {
+      console.error('Insert error:', error);
+      throw error;
+    }
+    
+    res.json(data[0]);
+    
+  } catch (error) {
+    console.error('Error creating risk entry:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
