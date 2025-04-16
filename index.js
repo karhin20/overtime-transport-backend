@@ -503,17 +503,9 @@ app.put('/api/overtime/:entryId/approve', authenticateToken, async (req, res) =>
           canApprove = false;
         }
         break;
-      case 'Accountant':
-        // Accountant can only approve supervisor-approved entries
-        if (currentEntry.approval_status === 'Supervisor') {
-          newApprovalStatus = 'Accountant';
-        } else {
-          canApprove = false;
-        }
-        break;
       case 'Director':
-        // Director can only approve accountant-approved entries
-        if (currentEntry.approval_status === 'Accountant') {
+        // Director can only approve supervisor-approved entries
+        if (currentEntry.approval_status === 'Supervisor') {
           newApprovalStatus = 'Approved';
         } else {
           canApprove = false;
@@ -1326,242 +1318,116 @@ app.put('/api/summary/monthly/:workerId', authenticateToken, async (req, res) =>
     const { workerId } = req.params;
     const { month, year, category_a_amount, category_c_amount, transportation_cost } = req.body;
     
-    // Get admin role from token
-    const adminRole = req.user.role;
-    
-    // Define which roles can update and which statuses they can update
-    let requiredCurrentStatus = '';
-    let canUpdate = false;
+    // Verify required fields
+    if (!month || !year) {
+      return res.status(400).json({ error: 'Month and year are required' });
+    }
 
-    if (adminRole === 'Supervisor') {
-      requiredCurrentStatus = 'Standard'; // Supervisor can edit Standard entries
-      canUpdate = true;
-    } else if (adminRole === 'Accountant') {
-      requiredCurrentStatus = 'Supervisor'; // Accountant can edit Supervisor entries
-      canUpdate = true;
-    } else if (adminRole === 'Standard') {
-      requiredCurrentStatus = 'Pending'; // Standard users can edit Pending entries
-      canUpdate = true;
-    }
-    
-    if (!canUpdate) {
-      return res.status(403).json({
-        error: `Your role (${adminRole}) does not have permission to update amounts.`
-      });
-    }
-    
+    // Format month string with leading zero if needed
     const formattedMonth = month.toString().padStart(2, '0');
+    
+    // Calculate start and end dates for the month
     const startDate = `${year}-${formattedMonth}-01`;
     const endDate = new Date(year, parseInt(month), 0).toISOString().split('T')[0];
-
-    console.log(`Updating amounts for worker ${workerId} from ${startDate} to ${endDate} (Role: ${adminRole})`);
-    console.log(`New total amounts: Cat A: ${category_a_amount}, Cat C: ${category_c_amount}, Transport: ${transportation_cost}`);
-
-    // Find entries that match our criteria
-    let findQuery = supabase
+    
+    // Get all entries for this worker in the specified month
+    const { data: entries, error: getError } = await supabase
       .from('overtime_entries')
-      .select('id, category_a_hours, category_c_hours, transportation, approval_status')
+      .select('*')
       .eq('worker_id', workerId)
       .gte('date', startDate)
-      .lte('date', endDate)
-      .eq('approval_status', requiredCurrentStatus); // Filter by the required status for the role
-
-    // First get the entries that will be updated
-    const { data: entriesToUpdate, error: findError } = await findQuery;
+      .lte('date', endDate);
     
-    if (findError) {
-        console.error(`Error finding entries for worker ${workerId}:`, findError);
-        throw findError;
+    if (getError) {
+      console.error('Error fetching entries:', getError);
+      return res.status(500).json({ error: 'Failed to fetch entries' });
     }
     
-    if (!entriesToUpdate || entriesToUpdate.length === 0) {
-      console.log(`No entries found with status '${requiredCurrentStatus}' for worker ${workerId} in period ${startDate} - ${endDate}`);
-      return res.status(404).json({ 
-        error: `No entries found with status '${requiredCurrentStatus}' to update`,
-        role: adminRole,
-        period: { startDate, endDate }
-      });
+    // If no entries found, return error
+    if (!entries || entries.length === 0) {
+      return res.status(404).json({ error: 'No entries found for the specified month' });
     }
     
-    // Ensure the authenticated user ID is valid
-    if (!req.user || !req.user.id) {
-      console.error(`Error updating amounts: Invalid authenticated user ID in token.`);
-      return res.status(401).json({ 
-        error: 'Authentication error: Invalid user ID in token. Please sign in again.' 
-      });
-    }
+    // Calculate current totals
+    const currentTotals = entries.reduce((acc, entry) => ({
+      category_a_hours: acc.category_a_hours + (entry.category_a_hours || 0),
+      category_c_hours: acc.category_c_hours + (entry.category_c_hours || 0),
+      category_a_amount: acc.category_a_amount + (entry.category_a_amount || 0),
+      category_c_amount: acc.category_c_amount + (entry.category_c_amount || 0),
+      transportation_count: acc.transportation_count + (entry.transportation ? 1 : 0),
+      transportation_cost: acc.transportation_cost + (entry.transportation ? (entry.transportation_cost || 0) : 0)
+    }), {
+      category_a_hours: 0,
+      category_c_hours: 0,
+      category_a_amount: 0,
+      category_c_amount: 0,
+      transportation_count: 0,
+      transportation_cost: 0
+    });
     
-    console.log(`Found ${entriesToUpdate.length} entries with status '${requiredCurrentStatus}' to update`);
-    
-    // Calculate total category hours
-    const totalCatAHours = entriesToUpdate.reduce((sum, entry) => sum + (entry.category_a_hours || 0), 0);
-    const totalCatCHours = entriesToUpdate.reduce((sum, entry) => sum + (entry.category_c_hours || 0), 0);
-    const transportEntries = entriesToUpdate.filter(entry => entry.transportation);
-    
-    // Prepare batch updates - we'll calculate individual amounts based on the proportion of hours
+    // Set up batch update for all entries
     const updates = [];
     
-    // For transportation, use a more precise approach to avoid rounding errors
-    let remainingTransportCost = transportation_cost;
-    let transportUpdates = [];
-    
-    for (const entry of entriesToUpdate) {
-      const update = {
-        id: entry.id,
-        last_edited_by: req.user.id,
-        last_edited_at: new Date().toISOString()
-      };
+    // Distribute the new amounts proportionally
+    for (const entry of entries) {
+      const newEntry = { ...entry };
       
-      // Calculate individual category amounts proportionally if there are hours, otherwise zero
-      if (totalCatAHours > 0 && entry.category_a_hours > 0) {
-        update.category_a_amount = (entry.category_a_hours / totalCatAHours) * category_a_amount;
-      } else {
-        update.category_a_amount = entry.category_a_hours > 0 ? category_a_amount / entriesToUpdate.length : 0;
+      // Calculate proportional rates for Category A
+      if (currentTotals.category_a_hours > 0 && category_a_amount !== undefined) {
+        const proportion = (entry.category_a_hours || 0) / currentTotals.category_a_hours;
+        newEntry.category_a_amount = proportion * category_a_amount;
       }
       
-      if (totalCatCHours > 0 && entry.category_c_hours > 0) {
-        update.category_c_amount = (entry.category_c_hours / totalCatCHours) * category_c_amount;
-      } else {
-        update.category_c_amount = entry.category_c_hours > 0 ? category_c_amount / entriesToUpdate.length : 0;
+      // Calculate proportional rates for Category C
+      if (currentTotals.category_c_hours > 0 && category_c_amount !== undefined) {
+        const proportion = (entry.category_c_hours || 0) / currentTotals.category_c_hours;
+        newEntry.category_c_amount = proportion * category_c_amount;
       }
       
-      // Store transportation entries separately to handle precision
-      if (entry.transportation && transportEntries.length > 0) {
-        const perDayAmount = parseFloat((transportation_cost / transportEntries.length).toFixed(2));
-        update.transportation_cost = perDayAmount;
-        remainingTransportCost -= perDayAmount;
-        transportUpdates.push(update);
-      } else {
-        updates.push(update);
+      // Calculate proportional rates for transportation
+      if (entry.transportation && currentTotals.transportation_count > 0 && transportation_cost !== undefined) {
+        const transportProportion = 1 / currentTotals.transportation_count;
+        newEntry.transportation_cost = transportProportion * transportation_cost;
+      }
+      
+      // Add to update batch if values changed
+      if (
+        newEntry.category_a_amount !== entry.category_a_amount ||
+        newEntry.category_c_amount !== entry.category_c_amount ||
+        newEntry.transportation_cost !== entry.transportation_cost
+      ) {
+        updates.push({
+          id: entry.id,
+          category_a_amount: newEntry.category_a_amount,
+          category_c_amount: newEntry.category_c_amount,
+          transportation_cost: entry.transportation ? newEntry.transportation_cost : entry.transportation_cost,
+          last_edited_by: req.user.id,
+          last_edited_at: new Date()
+        });
       }
     }
     
-    // Adjust the last transportation entry to account for any rounding difference
-    if (transportUpdates.length > 0) {
-      // Add any remaining amount (due to rounding) to the last entry
-      const lastEntry = transportUpdates[transportUpdates.length - 1];
-      lastEntry.transportation_cost += parseFloat(remainingTransportCost.toFixed(2));
-      
-      // Add all transportation updates to the main updates array
-      updates.push(...transportUpdates);
-    }
-    
-    // Process each update individually instead of batch upsert
-    let updatedEntries = [];
-    let updateError = null;
-    
-    // Use a transaction for batch updates to improve performance
-    try {
-      // Start a transaction
-      const entryIds = updates.map(update => update.id);
-      
-      // First, get all entries that will be updated to return later
-      const { data: entriesToReturn, error: fetchError } = await supabase
+    // If there are updates, apply them
+    if (updates.length > 0) {
+      // Use a transaction to update all entries
+      const { error: updateError } = await supabase
         .from('overtime_entries')
-        .select(`
-          id,
-          worker_id,
-          date,
-          category_a_hours,
-          category_c_hours,
-        category_a_amount,
-        category_c_amount,
-          transportation,
-        transportation_cost,
-          approval_status
-        `)
-        .in('id', entryIds);
-        
-      if (fetchError) {
-        throw fetchError;
+        .upsert(updates);
+      
+      if (updateError) {
+        console.error('Error updating entries:', updateError);
+        return res.status(500).json({ error: 'Failed to update entries' });
       }
-      
-      // **DEBUG:** Log the user ID being used right before the update
-      const userIdToUpdate = req.user.id;
-      // console.log(`DEBUG: Attempting to update entries with last_edited_by = ${userIdToUpdate}`);
-      
-      // ---> PRE-CHECK: Verify the user ID exists in the admins table before attempting the batch update
-      const { data: adminCheck, error: adminCheckError } = await supabase
-        .from('admins')
-        .select('id')
-        .eq('id', userIdToUpdate)
-        .maybeSingle(); // Use maybeSingle to handle not found without erroring
-
-      if (adminCheckError) {
-        console.error(`Error checking admin existence for ID ${userIdToUpdate}:`, adminCheckError);
-        throw new Error('Database error checking editor permissions.');
-      }
-      
-      if (!adminCheck) {
-          console.error(`CRITICAL: User ID ${userIdToUpdate} from token not found in admins table before update.`);
-          throw new Error(`Editor with ID ${userIdToUpdate} not found. Cannot save changes.`);
-      }
-      // ---> END PRE-CHECK
-      
-      // Process updates individually to prevent NULL constraints issues
-      let batchError = null;
-      for (const update of updates) {
-        // console.log(`DEBUG: Updating entry ${update.id} with values:`, {
-        //   note: update.note,
-        //   last_approved_status: update.last_approved_status,
-        //   status: update.status,
-        //   last_edited_by: update.last_edited_by,
-        //   last_approved_by: update.last_approved_by
-        // });
-        
-        const { error } = await supabase
-          .from('overtime_entries')
-          .update({
-            category_a_amount: update.category_a_amount,
-            category_c_amount: update.category_c_amount,
-            transportation_cost: update.transportation_cost,
-            last_edited_by: userIdToUpdate, // Use the validated ID
-            last_edited_at: update.last_edited_at
-          })
-          .eq('id', update.id);
-          
-        if (error) {
-          console.error(`Error updating entry ${update.id}:`, error);
-          batchError = error;
-          break;
-        }
-      }
-      
-      if (batchError) {
-        throw batchError;
-      }
-      
-      // Merge the updated values with the fetched entries
-      updatedEntries = entriesToReturn.map(entry => {
-        const update = updates.find(u => u.id === entry.id);
-        return {
-          ...entry,
-          category_a_amount: update.category_a_amount,
-          category_c_amount: update.category_c_amount,
-          transportation_cost: update.transportation_cost
-        };
-      });
-    } catch (err) {
-      console.error('Error during batch update:', err);
-      updateError = err;
     }
     
-    if (updateError) {
-      console.error('Error occurred during updates:', updateError);
-      throw updateError;
-    }
-    
-    res.json({
-      message: `Successfully updated ${updatedEntries.length} entries with status '${requiredCurrentStatus}'`,
-      updatedEntries: updatedEntries
+    // Return success
+    return res.json({ 
+      message: 'Monthly summary updated successfully',
+      updates_count: updates.length
     });
-
   } catch (error) {
-    console.error('Error updating amounts:', error);
-    // Ensure a consistent error response format
-    res.status(500).json({ 
-        error: error.message || 'An unexpected error occurred while updating amounts' 
-    });
+    console.error('Error updating monthly summary:', error);
+    return res.status(500).json({ error: 'An unexpected error occurred' });
   }
 });
 
@@ -1584,13 +1450,9 @@ app.put('/api/summary/monthly/:workerId/approve', authenticateToken, async (req,
         newStatus = 'Supervisor';
         requiredCurrentStatus = 'Standard';
         break;
-      case 'Accountant':
-        newStatus = 'Accountant';
-        requiredCurrentStatus = 'Supervisor';
-        break;
       case 'Director':
         newStatus = 'Approved';
-        requiredCurrentStatus = 'Accountant';
+        requiredCurrentStatus = 'Supervisor';
         break;
       default:
         canApprove = false;
@@ -1675,28 +1537,28 @@ app.put('/api/summary/monthly/approve-all-director', authenticateToken, async (r
     const startDate = `${year}-${formattedMonth}-01`;
     const endDate = new Date(year, parseInt(month), 0).toISOString().split('T')[0];
     
-    // Find all entries with 'Accountant' status for the given month/year
+    // Find all entries with 'Supervisor' status for the given month/year
     const { data: entriesToApprove, error: findError } = await supabase
       .from('overtime_entries')
       .select('id') // Only need IDs
       .gte('date', startDate)
       .lte('date', endDate)
-      .eq('approval_status', 'Accountant');
+      .eq('approval_status', 'Supervisor');
       
     if (findError) {
-      console.error('Error finding Accountant-approved entries for bulk approval:', findError);
+      console.error('Error finding Supervisor-approved entries for bulk approval:', findError);
       throw findError;
     }
     
     if (!entriesToApprove || entriesToApprove.length === 0) {
       return res.json({
-        message: 'No Accountant-approved entries found for this period to approve.',
+        message: 'No Supervisor-approved entries found for this period to approve.',
         updatedEntries: []
       });
     }
     
     const entryIdsToApprove = entriesToApprove.map(entry => entry.id);
-    console.log(`Director bulk approving ${entryIdsToApprove.length} Accountant-approved entries.`);
+    console.log(`Director bulk approving ${entryIdsToApprove.length} Supervisor-approved entries.`);
     
     // Update these entries to 'Approved' status
     const { data: updatedEntries, error: updateError } = await supabase
@@ -2155,9 +2017,9 @@ app.delete('/api/overtime/:entryId', authenticateToken, async (req, res) => {
       throw fetchError;
     }
 
-    // Permission check: Standard role can only delete their own PENDING entries
-    if (adminRole === 'Standard' && (entry.created_by !== adminId || entry.approval_status !== 'Pending')) {
-      return res.status(403).json({ error: 'Standard admins can only delete pending entries they created.' });
+    // Permission check: Standard role can delete any PENDING or REJECTED entries
+    if (adminRole === 'Standard' && !['Pending', 'Rejected'].includes(entry.approval_status)) {
+      return res.status(403).json({ error: 'Standard admins can only delete Pending or Rejected entries.' });
     }
     
     // Supervisors and above can delete any entry regardless of status or creator
@@ -2166,10 +2028,9 @@ app.delete('/api/overtime/:entryId', authenticateToken, async (req, res) => {
     }
     
     // Allow Supervisor+ roles even if they didn't create it or it's not pending
-    if (adminRole !== 'Standard' && entry.approval_status !== 'Pending') {
+    if (adminRole !== 'Standard' && !['Pending', 'Rejected'].includes(entry.approval_status)) {
         // Log this action? Maybe not necessary unless required
     }
-
 
     // Perform the deletion
     const { error: deleteError } = await supabase
