@@ -1776,11 +1776,35 @@ app.post('/api/clock/out', authenticateToken, async (req, res) => {
     console.log(`Clock out for worker ${workerId} with validated location:`, locationData);
 
     // Update the entry with clock out time and location
-    const now = new Date().toISOString();
+    const now = new Date(); // Use Date object for easier manipulation
+    const nowISOString = now.toISOString(); // Keep ISO string for DB timestamp
+    
+    // Apply rounding logic to clock out time
+    let clockOutHour = now.getHours();
+    let clockOutMinute = now.getMinutes();
+    
+    if (clockOutMinute > 15) {
+      clockOutHour = (clockOutHour + 1) % 24; // Increment hour, wrap around midnight
+      clockOutMinute = 0;
+    } else {
+      // Keep the original hour but set minutes to 0 if <= 15. Or maybe keep original hour and minutes if <= 15? Let's keep original hour and minutes if <= 15 for now, only round up if > 15.
+      // Re-reading the request: "I dont want overtime clock in enteries to have minutes just like the admin entry." This implies *all* minutes should be zeroed out if not rounded up.
+      // Let's clarify: round up if > 15, otherwise set minutes to 00.
+      clockOutMinute = 0; // Set minutes to 0 if not rounded up
+    }
+    
+    // Create a new Date object with the rounded time for HH:MM extraction
+    const roundedClockOutTime = new Date(now);
+    roundedClockOutTime.setHours(clockOutHour);
+    roundedClockOutTime.setMinutes(clockOutMinute);
+    roundedClockOutTime.setSeconds(0);
+    roundedClockOutTime.setMilliseconds(0);
+
+
     const { data, error } = await supabase
       .from('clock_entries')
       .update({
-        clock_out_time: now,
+        clock_out_time: nowISOString, // Use original ISO string for accurate timestamp
         clock_out_location: locationData
       })
       .eq('id', activeEntry.id)
@@ -1797,7 +1821,7 @@ app.post('/api/clock/out', authenticateToken, async (req, res) => {
       .insert([{
         worker_id: workerId,
         event_type: 'clock_out',
-        timestamp: now,
+        timestamp: nowISOString,
         location_latitude: parsedLat,
         location_longitude: parsedLng
       }])
@@ -1846,8 +1870,10 @@ app.post('/api/clock/out', authenticateToken, async (req, res) => {
     }
 
     // Format the entry/exit times to HH:MM format for overtime entries
+    // Use the original clock-in time
     const entryTime = activeEntry.clock_in_time.split('T')[1].substring(0, 5); // Extract HH:MM
-    const exitTime = now.split('T')[1].substring(0, 5); // Extract HH:MM
+    // Use the rounded clock-out time
+    const exitTime = roundedClockOutTime.toISOString().split('T')[1].substring(0, 5); // Extract HH:MM from rounded time
 
     // Determine if today is a weekend or holiday to set the correct category
     const todayDate = new Date(today);
@@ -1873,7 +1899,7 @@ app.post('/api/clock/out', authenticateToken, async (req, res) => {
       // Update existing entry with new data
       
       const updateData = {
-        last_edited_at: now,
+        last_edited_at: nowISOString, // Use the original ISO string
         last_edited_by: '00000000-0000-0000-0000-000000000000', // System admin account
         // Set the category based on day type
         category: category,
@@ -1881,9 +1907,9 @@ app.post('/api/clock/out', authenticateToken, async (req, res) => {
         transportation: true,
         transportation_cost: transportationCost,
         automatically_generated: true, // Flag entries created through the clock system
-        // Update entry/exit time if they're not already set
-        entry_time: existingEntry.entry_time || entryTime,
-        exit_time: existingEntry.exit_time || exitTime
+        // Update entry/exit time if they're not already set - always update now with calculated times
+        entry_time: entryTime,
+        exit_time: exitTime
       };
       
       // Add overtime if applicable
