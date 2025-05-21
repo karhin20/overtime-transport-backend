@@ -1669,11 +1669,32 @@ app.post('/api/clock/in', authenticateToken, async (req, res) => {
     };
 
     // Create new clock entry
+    const now = new Date(); // Use Date object for easier manipulation
+    const nowISOString = now.toISOString(); // Keep original ISO string for accurate timestamp
+    
+    // Apply rounding logic to clock in time
+    let clockInHour = now.getHours();
+    let clockInMinute = now.getMinutes();
+    
+    if (clockInMinute > 15) {
+      clockInHour = (clockInHour + 1) % 24; // Increment hour, wrap around midnight
+      clockInMinute = 0;
+    } else {
+      clockInMinute = 0; // Set minutes to 0 if not rounded up
+    }
+    
+    // Create a new Date object with the rounded time for DB insertion
+    const roundedClockInTime = new Date(now);
+    roundedClockInTime.setHours(clockInHour);
+    roundedClockInTime.setMinutes(clockInMinute);
+    roundedClockInTime.setSeconds(0);
+    roundedClockInTime.setMilliseconds(0);
+
     const { data, error } = await supabase
       .from('clock_entries')
       .insert([{
         worker_id: workerId,
-        clock_in_time: new Date().toISOString(),
+        clock_in_time: roundedClockInTime.toISOString(), // Use rounded time for the entry
         clock_in_location: locationData
       }])
       .select()
@@ -1689,7 +1710,7 @@ app.post('/api/clock/in', authenticateToken, async (req, res) => {
       .insert([{
         worker_id: workerId,
         event_type: 'clock_in',
-        timestamp: new Date().toISOString(),
+        timestamp: nowISOString, // Use the original timestamp for the event log
         location_latitude: parsedLat,
         location_longitude: parsedLng
       }])
