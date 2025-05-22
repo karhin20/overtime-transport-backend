@@ -2317,3 +2317,100 @@ app.post('/api/admin/developer-role', [
     res.status(500).json({ error: error.message });
   }
 });
+
+// Update monthly summary amounts
+app.put('/api/summary/monthly/:workerId', authenticateToken, async (req, res) => {
+  try {
+    const { workerId } = req.params;
+    const { month, year, data } = req.body;
+
+    // Validate required fields
+    if (!month || !year || !data) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Ensure this action is performed by an authorized role
+    if (!['Standard', 'Supervisor', 'Accountant', 'Director', 'RDM', 'RCM'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Permission denied. Unauthorized role.' });
+    }
+
+    const formattedMonth = month.toString().padStart(2, '0');
+    const startDate = `${year}-${formattedMonth}-01`;
+    const endDate = new Date(year, parseInt(month), 0).toISOString().split('T')[0];
+
+    // Get all entries for the worker in the specified month
+    const { data: entries, error: findError } = await supabase
+      .from('overtime_entries')
+      .select('*')
+      .eq('worker_id', workerId)
+      .gte('date', startDate)
+      .lte('date', endDate);
+
+    if (findError) {
+      console.error('Error finding entries:', findError);
+      throw findError;
+    }
+
+    if (!entries || entries.length === 0) {
+      return res.status(404).json({ error: 'No entries found for this period' });
+    }
+
+    // Calculate total hours for proportional distribution
+    const totalCategoryAHours = entries.reduce((sum, entry) => sum + (entry.category_a_hours || 0), 0);
+    const totalCategoryCHours = entries.reduce((sum, entry) => sum + (entry.category_c_hours || 0), 0);
+    const totalTransportDays = entries.filter(entry => entry.transportation).length;
+
+    // Update each entry proportionally
+    const updatePromises = entries.map(async (entry) => {
+      const categoryAHours = entry.category_a_hours || 0;
+      const categoryCHours = entry.category_c_hours || 0;
+      const hasTransport = entry.transportation;
+
+      // Calculate proportional amounts
+      const categoryAAmount = totalCategoryAHours > 0 
+        ? (categoryAHours / totalCategoryAHours) * data.category_a_amount 
+        : 0;
+      
+      const categoryCAmount = totalCategoryCHours > 0 
+        ? (categoryCHours / totalCategoryCHours) * data.category_c_amount 
+        : 0;
+      
+      const transportCost = totalTransportDays > 0 && hasTransport
+        ? (1 / totalTransportDays) * data.transportation_cost 
+        : 0;
+
+      // Update the entry
+      const { error: updateError } = await supabase
+        .from('overtime_entries')
+        .update({
+          category_a_amount: categoryAAmount,
+          category_c_amount: categoryCAmount,
+          transportation_cost: transportCost,
+          last_edited_by: req.user.id,
+          last_edited_at: new Date().toISOString()
+        })
+        .eq('id', entry.id);
+
+      if (updateError) {
+        throw updateError;
+      }
+    });
+
+    // Wait for all updates to complete
+    await Promise.all(updatePromises);
+
+    res.json({
+      message: 'Successfully updated monthly amounts',
+      workerId,
+      month,
+      year,
+      totalEntries: entries.length
+    });
+
+  } catch (error) {
+    console.error('Error updating monthly amounts:', error);
+    res.status(500).json({ 
+      error: error.message || 'An unexpected error occurred while updating amounts' 
+    });
+  }
+});
