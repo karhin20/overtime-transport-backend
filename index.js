@@ -1409,14 +1409,22 @@ app.put('/api/summary/monthly/:workerId', authenticateToken, async (req, res) =>
     
     // If there are updates, apply them
     if (updates.length > 0) {
-      // Use a transaction to update all entries
-      const { error: updateError } = await supabase
-        .from('overtime_entries')
-        .upsert(updates);
-      
-      if (updateError) {
-        console.error('Error updating entries:', updateError);
-        return res.status(500).json({ error: 'Failed to update entries' });
+      // Update each entry individually to avoid NOT NULL constraint issues
+      for (const update of updates) {
+        const { error: updateError } = await supabase
+          .from('overtime_entries')
+          .update({
+            category_a_amount: update.category_a_amount,
+            category_c_amount: update.category_c_amount,
+            transportation_cost: update.transportation_cost,
+            last_edited_by: update.last_edited_by,
+            last_edited_at: update.last_edited_at
+          })
+          .eq('id', update.id);
+        if (updateError) {
+          console.error('Error updating entry:', updateError);
+          return res.status(500).json({ error: 'Failed to update entries' });
+        }
       }
     }
     
