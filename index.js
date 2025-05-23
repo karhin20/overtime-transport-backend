@@ -986,14 +986,14 @@ app.post('/api/risk', authenticateToken, async (req, res) => {
     if (!worker_id || !date || !location || !size_depth) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-
+    
     let insertObj = {
-      worker_id,
-      date,
-      location,
-      size_depth,
-      remarks,
-      rate
+        worker_id,
+        date,
+        location,
+        size_depth, 
+        remarks,
+        rate
     };
 
     if (req.user.role) {
@@ -1023,14 +1023,14 @@ app.post('/api/risk', authenticateToken, async (req, res) => {
              name
         )
       `);
-
+    
     if (error) {
       console.error('Insert error:', error);
       throw error;
     }
-
+    
     res.json(data[0]);
-
+    
   } catch (error) {
     console.error('Error creating risk entry:', error);
     res.status(500).json({ error: error.message });
