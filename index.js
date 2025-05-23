@@ -982,24 +982,33 @@ app.get('/api/risk/summary/:workerId', authenticateToken, async (req, res) => {
 app.post('/api/risk', authenticateToken, async (req, res) => {
   try {
     const { worker_id, date, location, size_depth, remarks, rate = 10.00 } = req.body;
-    
     // Validate required fields
     if (!worker_id || !date || !location || !size_depth) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    
-    // Insert the risk entry
+
+    let insertObj = {
+      worker_id,
+      date,
+      location,
+      size_depth,
+      remarks,
+      rate
+    };
+
+    if (req.user.role) {
+      // Admin submission
+      insertObj.created_by = req.user.id;
+      insertObj.last_edited_by = req.user.id;
+    } else if (req.user.type === 'worker') {
+      // Worker submission
+      insertObj.created_by_worker = req.user.id;
+      // Optionally, you could add last_edited_by_worker if you want to track edits by workers
+    }
+
     const { data, error } = await supabase
       .from('risk_entries')
-      .insert([{
-        worker_id,
-        date,
-        location,
-        size_depth, 
-        remarks,
-        rate,
-        created_by: req.user.id
-      }])
+      .insert([insertObj])
       .select(`
         *,
         worker:worker_id (
@@ -1014,14 +1023,14 @@ app.post('/api/risk', authenticateToken, async (req, res) => {
              name
         )
       `);
-    
+
     if (error) {
       console.error('Insert error:', error);
       throw error;
     }
-    
+
     res.json(data[0]);
-    
+
   } catch (error) {
     console.error('Error creating risk entry:', error);
     res.status(500).json({ error: error.message });
@@ -2078,7 +2087,7 @@ app.delete('/api/overtime/:entryId', authenticateToken, async (req, res) => {
     }
     
     // Supervisors and above can delete any entry regardless of status or creator
-    if (!['Standard', 'Supervisor', 'Accountant', 'Director'].includes(adminRole)) {
+    if (!['Standard', 'Supervisor', 'Accountant', 'Director', 'District_Head'].includes(adminRole)) {
         return res.status(403).json({ error: 'Permission denied.' });
     }
     
@@ -2167,7 +2176,7 @@ app.put('/api/risk/:entryId', authenticateToken, async (req, res) => {
     if (adminRole === 'Standard' && entry.created_by !== adminId) {
       return res.status(403).json({ error: 'Standard admins can only edit entries they created.' });
     }
-    if (!['Standard', 'Supervisor', 'Accountant', 'Director'].includes(adminRole)) {
+    if (!['Standard', 'Supervisor', 'Accountant', 'Director', 'District_Head'].includes(adminRole)) {
       return res.status(403).json({ error: 'Permission denied.' });
     }
 
@@ -2237,7 +2246,7 @@ app.delete('/api/risk/:entryId', authenticateToken, async (req, res) => {
     if (adminRole === 'Standard' && entry.created_by !== adminId) {
       return res.status(403).json({ error: 'Standard admins can only delete entries they created.' });
     }
-     if (!['Standard', 'Supervisor', 'Accountant', 'Director'].includes(adminRole)) {
+     if (!['Standard', 'Supervisor', 'Accountant', 'Director', 'District_Head'].includes(adminRole)) {
        return res.status(403).json({ error: 'Permission denied.' });
      }
 
